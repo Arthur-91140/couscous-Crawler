@@ -2,9 +2,7 @@ use crate::cli::Args;
 use crate::database::Database;
 use crate::extractor::{extract_emails, extract_links, is_same_domain};
 use reqwest::Client;
-use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use url::Url;
 
 /// Crawler state
@@ -25,7 +23,7 @@ impl Crawler {
             .to_string();
 
         let client = Client::builder()
-            .user_agent("CouscousCrawler/0.1 (Educational Web Crawler)")
+            .user_agent("CouscousCrawler/0.1")
             .timeout(std::time::Duration::from_millis(args.timeout))
             .build()?;
 
@@ -37,33 +35,37 @@ impl Crawler {
         })
     }
 
+    /// Initialize the crawl (queue start URL or resume)
+    pub fn init(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.args.resume {
+            // Reset any URLs that were processing when interrupted
+            let reset = self.db.reset_processing()?;
+            if reset > 0 {
+                println!("Resumed {} interrupted URLs", reset);
+            }
+            let pending = self.db.pending_count()?;
+            println!("Pending URLs in queue: {}", pending);
+        } else {
+            // Clear queue and start fresh
+            self.db.clear_queue()?;
+            self.db.queue_url(&self.args.url, 1)?;
+        }
+        Ok(())
+    }
+
     /// Run the crawler
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let start_url = Url::parse(&self.args.url)?;
-        
-        // Shared state
-        let visited: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-        let queue: Arc<Mutex<VecDeque<(Url, u32)>>> = Arc::new(Mutex::new(VecDeque::new()));
-        
-        // Add initial URL
-        {
-            let mut q = queue.lock().await;
-            q.push_back((start_url, 1));
-        }
-
-        // Process queue with worker pool
+        // Spawn workers
         let mut handles = vec![];
         
         for _ in 0..self.args.workers {
             let client = self.client.clone();
             let db = self.db.clone();
-            let visited = visited.clone();
-            let queue = queue.clone();
             let args = self.args.clone();
             let base_domain = self.base_domain.clone();
             
             handles.push(tokio::spawn(async move {
-                worker_loop(client, db, visited, queue, args, base_domain).await;
+                worker_loop(client, db, args, base_domain).await;
             }));
         }
 
@@ -79,24 +81,20 @@ impl Crawler {
 async fn worker_loop(
     client: Client,
     db: Arc<Database>,
-    visited: Arc<Mutex<HashSet<String>>>,
-    queue: Arc<Mutex<VecDeque<(Url, u32)>>>,
     args: Args,
     base_domain: String,
 ) {
     let mut idle_count = 0;
     
     loop {
-        // Try to get a task from the queue
-        let task = {
-            let mut q = queue.lock().await;
-            q.pop_front()
-        };
+        // Try to get a task from the database queue
+        let task = db.pop_url().ok().flatten();
 
         match task {
             Some((url, depth)) => {
                 idle_count = 0;
-                process_url(&client, &db, &visited, &queue, &args, &base_domain, url, depth).await;
+                process_url(&client, &db, &args, &base_domain, &url, depth).await;
+                let _ = db.complete_url(&url);
             }
             None => {
                 // No task available, wait a bit
@@ -116,34 +114,33 @@ async fn worker_loop(
 async fn process_url(
     client: &Client,
     db: &Arc<Database>,
-    visited: &Arc<Mutex<HashSet<String>>>,
-    queue: &Arc<Mutex<VecDeque<(Url, u32)>>>,
     args: &Args,
     base_domain: &str,
-    url: Url,
+    url: &str,
     depth: u32,
 ) {
-    let url_str = url.to_string();
-
     // Check if already visited
-    {
-        let mut v = visited.lock().await;
-        if v.contains(&url_str) {
-            return;
-        }
-        v.insert(url_str.clone());
+    if db.is_visited(url).unwrap_or(true) {
+        return;
     }
+    let _ = db.mark_visited(url);
 
     if args.verbose {
-        println!("[Crawling] {} (depth: {})", url_str, depth);
+        println!("[Crawling] {} (depth: {})", url, depth);
     }
 
+    // Parse URL
+    let parsed_url = match Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+
     // Fetch the page
-    let html = match fetch_page(client, &url).await {
+    let html = match fetch_page(client, &parsed_url).await {
         Ok(content) => content,
         Err(e) => {
             if args.verbose {
-                eprintln!("[Error] {}: {}", url_str, e);
+                eprintln!("[Error] {}: {}", url, e);
             }
             return;
         }
@@ -153,7 +150,7 @@ async fn process_url(
     let emails = extract_emails(&html);
     let mut new_emails = 0;
     for email in &emails {
-        match db.insert_email(email, &url_str) {
+        match db.insert_email(email, url) {
             Ok(true) => new_emails += 1,
             Ok(false) => {}
             Err(e) => {
@@ -165,7 +162,7 @@ async fn process_url(
     }
 
     if !emails.is_empty() {
-        println!("Found {} emails ({} new) on {}", emails.len(), new_emails, url_str);
+        println!("Found {} emails ({} new) on {}", emails.len(), new_emails, url);
     }
 
     // Check depth limit
@@ -173,29 +170,19 @@ async fn process_url(
     
     if should_follow_links {
         // Extract and queue new links
-        let links = extract_links(&html, &url);
-        let mut new_links = vec![];
+        let links = extract_links(&html, &parsed_url);
         
-        {
-            let v = visited.lock().await;
-            for link in links {
-                // Check domain constraint
-                if args.stay_on_domain && !is_same_domain(&link, base_domain) {
-                    continue;
-                }
-
-                let link_str = link.to_string();
-                if !v.contains(&link_str) {
-                    new_links.push((link, depth + 1));
-                }
+        for link in links {
+            // Check domain constraint
+            if args.stay_on_domain && !is_same_domain(&link, base_domain) {
+                continue;
             }
-        }
 
-        // Add new links to queue
-        if !new_links.is_empty() {
-            let mut q = queue.lock().await;
-            for task in new_links {
-                q.push_back(task);
+            let link_str = link.to_string();
+            
+            // Check if already visited before queuing
+            if !db.is_visited(&link_str).unwrap_or(true) {
+                let _ = db.queue_url(&link_str, depth + 1);
             }
         }
     }

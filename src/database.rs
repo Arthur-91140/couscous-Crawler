@@ -19,6 +19,8 @@ impl Database {
     /// Initialize the database schema
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        
+        // Emails table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,9 +32,32 @@ impl Database {
             [],
         )?;
         
-        // Create index for faster lookups
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_email ON emails(email)",
+            [],
+        )?;
+
+        // URL queue table for persistence
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS url_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT NOT NULL UNIQUE,
+                depth INTEGER NOT NULL,
+                status TEXT DEFAULT 'pending'
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queue_status ON url_queue(status)",
+            [],
+        )?;
+
+        // Visited URLs table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS visited (
+                url TEXT PRIMARY KEY
+            )",
             [],
         )?;
         
@@ -49,6 +74,108 @@ impl Database {
         Ok(result > 0)
     }
 
+    /// Add URL to queue (ignores if already exists)
+    pub fn queue_url(&self, url: &str, depth: u32) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO url_queue (url, depth, status) VALUES (?1, ?2, 'pending')",
+            params![url, depth],
+        )?;
+        Ok(result > 0)
+    }
+
+    /// Get next pending URL from queue
+    pub fn pop_url(&self) -> Result<Option<(String, u32)>> {
+        let conn = self.conn.lock().unwrap();
+        
+        let result: Option<(i64, String, u32)> = conn.query_row(
+            "SELECT id, url, depth FROM url_queue WHERE status = 'pending' LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).ok();
+
+        if let Some((id, url, depth)) = result {
+            conn.execute(
+                "UPDATE url_queue SET status = 'processing' WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(Some((url, depth)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Mark URL as completed
+    pub fn complete_url(&self, url: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE url_queue SET status = 'done' WHERE url = ?1",
+            params![url],
+        )?;
+        Ok(())
+    }
+
+    /// Check if URL was already visited
+    pub fn is_visited(&self, url: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM visited WHERE url = ?1",
+            params![url],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Mark URL as visited
+    pub fn mark_visited(&self, url: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO visited (url) VALUES (?1)",
+            params![url],
+        )?;
+        Ok(())
+    }
+
+    /// Get count of pending URLs
+    pub fn pending_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM url_queue WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Get count of processing URLs
+    pub fn processing_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM url_queue WHERE status = 'processing'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Reset processing URLs to pending (for resume)
+    pub fn reset_processing(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE url_queue SET status = 'pending' WHERE status = 'processing'",
+            [],
+        )?;
+        Ok(count as u64)
+    }
+
+    /// Clear queue (for fresh start)
+    pub fn clear_queue(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM url_queue", [])?;
+        conn.execute("DELETE FROM visited", [])?;
+        Ok(())
+    }
+
     /// Get total count of unique emails
     pub fn get_email_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
@@ -60,7 +187,7 @@ impl Database {
         Ok(count)
     }
 
-    /// Get total count of email entries (including duplicates from different sources)
+    /// Get total count of email entries
     pub fn get_total_entries(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: u64 = conn.query_row(

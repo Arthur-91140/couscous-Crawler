@@ -20,13 +20,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Stay on domain: {}", args.stay_on_domain);
     println!("Workers: {}", args.workers);
     println!("Database: {}", args.db);
+    println!("Resume: {}", args.resume);
     println!();
 
     // Initialize database
     let db = Arc::new(Database::new(&args.db)?);
     
-    // Create and run crawler
+    // Create crawler
     let crawler = Crawler::new(args.clone(), db.clone())?;
+    
+    // Initialize (queue start URL or resume)
+    crawler.init()?;
     
     let start_time = Instant::now();
     

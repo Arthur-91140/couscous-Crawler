@@ -31,6 +31,10 @@ pub struct Args {
     #[arg(short = 't', long, default_value_t = 30000)]
     pub timeout: u64,
 
+    /// Resume from existing database
+    #[arg(short, long, default_value_t = false)]
+    pub resume: bool,
+
     /// Verbose output
     #[arg(short, long, default_value_t = false)]
     pub verbose: bool,
