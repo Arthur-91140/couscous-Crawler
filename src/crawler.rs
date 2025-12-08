@@ -3,8 +3,9 @@ use crate::database::Database;
 use crate::extractor::{extract_emails, extract_links, is_same_domain};
 use reqwest::Client;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use url::Url;
 
 /// Task to be processed by crawler workers
@@ -51,8 +52,11 @@ impl Crawler {
         let start_url = Url::parse(&self.args.url)?;
         
         // Channel for distributing tasks
-        let (tx, rx) = mpsc::channel::<CrawlTask>(1000);
-        let rx = Arc::new(Mutex::new(rx));
+        let (tx, mut rx) = mpsc::channel::<CrawlTask>(1000);
+        
+        // Track active tasks for graceful shutdown
+        let active_tasks = Arc::new(AtomicUsize::new(1)); // Start with 1 for the initial URL
+        let semaphore = Arc::new(Semaphore::new(self.args.workers));
 
         // Send initial task
         tx.send(CrawlTask {
@@ -60,33 +64,42 @@ impl Crawler {
             depth: 1,
         }).await?;
 
-        // Spawn workers
-        let mut handles = vec![];
-        for worker_id in 0..self.args.workers {
-            let worker = CrawlerWorker {
-                id: worker_id,
-                client: self.client.clone(),
-                db: self.db.clone(),
-                visited: self.visited.clone(),
-                args: self.args.clone(),
-                base_domain: self.base_domain.clone(),
-                tx: tx.clone(),
-                rx: rx.clone(),
-            };
-            
-            handles.push(tokio::spawn(async move {
-                worker.run().await
-            }));
-        }
+        // Process tasks until all are done
+        while active_tasks.load(Ordering::SeqCst) > 0 || !tx.is_closed() {
+            // Try to receive with timeout to check termination condition
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                rx.recv()
+            ).await {
+                Ok(Some(task)) => {
+                    // Acquire semaphore permit
+                    let permit = semaphore.clone().acquire_owned().await.unwrap();
+                    
+                    let client = self.client.clone();
+                    let db = self.db.clone();
+                    let visited = self.visited.clone();
+                    let args = self.args.clone();
+                    let base_domain = self.base_domain.clone();
+                    let tx = tx.clone();
+                    let active = active_tasks.clone();
 
-        // Drop the original sender so the channel closes when all workers are done
-        drop(tx);
-
-        // Wait for all workers to complete
-        for handle in handles {
-            if let Err(e) = handle.await {
-                if self.args.verbose {
-                    eprintln!("[ERROR] Worker panicked: {:?}", e);
+                    tokio::spawn(async move {
+                        process_task(
+                            task, client, db, visited, args, base_domain, tx, active.clone()
+                        ).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        drop(permit);
+                    });
+                }
+                Ok(None) => {
+                    // Channel closed
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - check if we should exit
+                    if active_tasks.load(Ordering::SeqCst) == 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -95,134 +108,112 @@ impl Crawler {
     }
 }
 
-/// Individual crawler worker
-struct CrawlerWorker {
-    id: usize,
+async fn process_task(
+    task: CrawlTask,
     client: Client,
     db: Arc<Database>,
     visited: Arc<Mutex<HashSet<String>>>,
     args: Args,
     base_domain: String,
     tx: mpsc::Sender<CrawlTask>,
-    rx: Arc<Mutex<mpsc::Receiver<CrawlTask>>>,
-}
+    active_tasks: Arc<AtomicUsize>,
+) {
+    let url_str = task.url.to_string();
 
-impl CrawlerWorker {
-    async fn run(&self) {
-        loop {
-            // Try to get a task
-            let task = {
-                let mut rx = self.rx.lock().await;
-                rx.recv().await
-            };
+    // Check if already visited
+    {
+        let mut visited_guard = visited.lock().await;
+        if visited_guard.contains(&url_str) {
+            return;
+        }
+        visited_guard.insert(url_str.clone());
+    }
 
-            match task {
-                Some(task) => {
-                    self.process_task(task).await;
-                }
-                None => {
-                    // Channel closed, exit
-                    break;
+    if args.verbose {
+        println!("[Crawling] {} (depth: {})", url_str, task.depth);
+    }
+
+    // Fetch the page
+    let html = match fetch_page(&client, &task.url).await {
+        Ok(content) => content,
+        Err(e) => {
+            if args.verbose {
+                eprintln!("[Error] {}: {}", url_str, e);
+            }
+            return;
+        }
+    };
+
+    // Extract emails
+    let emails = extract_emails(&html);
+    let mut new_emails = 0;
+    for email in &emails {
+        match db.insert_email(email, &url_str) {
+            Ok(true) => new_emails += 1,
+            Ok(false) => {}
+            Err(e) => {
+                if args.verbose {
+                    eprintln!("[DB Error] {}", e);
                 }
             }
         }
     }
 
-    async fn process_task(&self, task: CrawlTask) {
-        let url_str = task.url.to_string();
+    if !emails.is_empty() {
+        println!("📧 Found {} emails ({} new) on {}", emails.len(), new_emails, url_str);
+    }
 
-        // Check if already visited
-        {
-            let mut visited = self.visited.lock().await;
-            if visited.contains(&url_str) {
-                return;
-            }
-            visited.insert(url_str.clone());
-        }
-
-        if self.args.verbose {
-            println!("[Worker {}] Crawling: {} (depth: {})", self.id, url_str, task.depth);
-        }
-
-        // Fetch the page
-        let html = match self.fetch_page(&task.url).await {
-            Ok(content) => content,
-            Err(e) => {
-                if self.args.verbose {
-                    eprintln!("[Worker {}] Error fetching {}: {}", self.id, url_str, e);
-                }
-                return;
-            }
-        };
-
-        // Extract emails
-        let emails = extract_emails(&html);
-        let mut new_emails = 0;
-        for email in &emails {
-            match self.db.insert_email(email, &url_str) {
-                Ok(true) => new_emails += 1,
-                Ok(false) => {}
-                Err(e) => {
-                    if self.args.verbose {
-                        eprintln!("[Worker {}] DB error: {}", self.id, e);
-                    }
-                }
-            }
-        }
-
-        if !emails.is_empty() && self.args.verbose {
-            println!("[Worker {}] Found {} emails ({} new) on {}", 
-                self.id, emails.len(), new_emails, url_str);
-        }
-
-        // Check depth limit
-        let should_follow_links = self.args.depth == 0 || task.depth < self.args.depth;
+    // Check depth limit
+    let should_follow_links = args.depth == 0 || task.depth < args.depth;
+    
+    if should_follow_links {
+        // Extract and queue new links
+        let links = extract_links(&html, &task.url);
         
-        if should_follow_links {
-            // Extract and queue new links
-            let links = extract_links(&html, &task.url);
-            
-            for link in links {
-                // Check domain constraint
-                if self.args.stay_on_domain && !is_same_domain(&link, &self.base_domain) {
+        for link in links {
+            // Check domain constraint
+            if args.stay_on_domain && !is_same_domain(&link, &base_domain) {
+                continue;
+            }
+
+            // Check if already visited
+            let link_str = link.to_string();
+            {
+                let visited_guard = visited.lock().await;
+                if visited_guard.contains(&link_str) {
                     continue;
                 }
+            }
 
-                // Check if already visited
-                let link_str = link.to_string();
-                {
-                    let visited = self.visited.lock().await;
-                    if visited.contains(&link_str) {
-                        continue;
-                    }
-                }
+            // Queue the new task
+            let new_task = CrawlTask {
+                url: link,
+                depth: task.depth + 1,
+            };
 
-                // Queue the new task
-                let new_task = CrawlTask {
-                    url: link,
-                    depth: task.depth + 1,
-                };
+            // Increment active tasks before sending
+            active_tasks.fetch_add(1, Ordering::SeqCst);
+            
+            if tx.send(new_task).await.is_err() {
+                // Channel closed, decrement back
+                active_tasks.fetch_sub(1, Ordering::SeqCst);
+                break;
+            }
+        }
+    }
+}
 
-                if self.tx.send(new_task).await.is_err() {
-                    // Channel closed
-                    break;
-                }
+async fn fetch_page(client: &Client, url: &Url) -> Result<String, reqwest::Error> {
+    let response = client.get(url.as_str()).send().await?;
+    
+    // Only process HTML content
+    if let Some(content_type) = response.headers().get("content-type") {
+        if let Ok(ct) = content_type.to_str() {
+            if !ct.contains("text/html") && !ct.contains("text/plain") {
+                return Ok(String::new());
             }
         }
     }
 
-    async fn fetch_page(&self, url: &Url) -> Result<String, reqwest::Error> {
-        let response = self.client.get(url.as_str()).send().await?;
-        
-        // Only process HTML content
-        if let Some(content_type) = response.headers().get("content-type") {
-            if let Ok(ct) = content_type.to_str() {
-                if !ct.contains("text/html") && !ct.contains("text/plain") {
-                    return Ok(String::new());
-                }
-            }
-        }
-
-        response.text().await
-    }
+    response.text().await
 }
