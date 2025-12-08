@@ -160,7 +160,7 @@ async fn process_task(
     }
 
     if !emails.is_empty() {
-        println!("📧 Found {} emails ({} new) on {}", emails.len(), new_emails, url_str);
+        println!("Found {} emails ({} new) on {}", emails.len(), new_emails, url_str);
     }
 
     // Check depth limit

@@ -13,7 +13,7 @@ use std::time::Instant;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
     
-    println!("🥘 Couscous Crawler v0.1.0");
+    println!("Couscous Crawler v0.1.0");
     println!("==========================");
     println!("Starting URL: {}", args.url);
     println!("Depth limit: {}", if args.depth == 0 { "unlimited".to_string() } else { args.depth.to_string() });
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let start_time = Instant::now();
     
-    println!("🚀 Starting crawl...\n");
+    println!("Starting crawl...\n");
     crawler.run().await?;
     
     let elapsed = start_time.elapsed();
@@ -40,11 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!();
     println!("==========================");
-    println!("✅ Crawl complete!");
-    println!("⏱️  Time elapsed: {:.2}s", elapsed.as_secs_f64());
-    println!("📧 Unique emails found: {}", unique_emails);
-    println!("📝 Total entries: {}", total_entries);
-    println!("💾 Results saved to: {}", args.db);
+    println!("Crawl complete!");
+    println!("Time elapsed: {:.2}s", elapsed.as_secs_f64());
+    println!("Unique emails found: {}", unique_emails);
+    println!("Total entries: {}", total_entries);
+    println!("Results saved to: {}", args.db);
     
     Ok(())
 }
