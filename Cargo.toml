@@ -1,0 +1,35 @@
+[package]
+name = "couscous-crawler"
+version = "0.1.0"
+edition = "2021"
+description = "A fast async web crawler that extracts emails using regex and stores them in SQLite"
+authors = ["Arthur"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+
+# HTML parsing
+scraper = "0.18"
+
+# SQLite database
+rusqlite = { version = "0.30", features = ["bundled"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Regex for email extraction
+regex = "1"
+
+# Lazy static for regex compilation
+lazy_static = "1"
+
+# URL parsing and manipulation
+url = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
