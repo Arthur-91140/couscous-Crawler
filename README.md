@@ -1,4 +1,4 @@
-# Couscous Crawler
+# 🥘 Couscous Crawler
 
 ![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
 ![Tokio](https://img.shields.io/badge/Tokio-000000?style=flat&logo=rust&logoColor=white)
