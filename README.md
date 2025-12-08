@@ -1,5 +1,9 @@
 # Couscous Crawler
 
+![Rust](https://img.shields.io/badge/Rust-000000?style=flat&logo=rust&logoColor=white)
+![Tokio](https://img.shields.io/badge/Tokio-000000?style=flat&logo=rust&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat&logo=sqlite&logoColor=white)
+
 A fast asynchronous web crawler written in Rust that extracts email addresses using regex and stores them in SQLite.
 
 ## Installation
@@ -35,6 +39,19 @@ couscous-crawler https://example.com -d 2 -s -w 15 -v --db results.db
 | `-w, --workers` | Async workers count | 10 |
 | `--db` | Database path | emails.db |
 | `-v, --verbose` | Verbose output | false |
+
+## Credits
+
+| Crate | Description | License |
+|-------|-------------|---------|
+| [tokio](https://crates.io/crates/tokio) | Async runtime | MIT |
+| [reqwest](https://crates.io/crates/reqwest) | HTTP client | MIT/Apache-2.0 |
+| [scraper](https://crates.io/crates/scraper) | HTML parsing | MIT |
+| [rusqlite](https://crates.io/crates/rusqlite) | SQLite bindings | MIT |
+| [clap](https://crates.io/crates/clap) | CLI argument parsing | MIT/Apache-2.0 |
+| [regex](https://crates.io/crates/regex) | Regular expressions | MIT/Apache-2.0 |
+| [url](https://crates.io/crates/url) | URL parsing | MIT/Apache-2.0 |
+| [lazy_static](https://crates.io/crates/lazy_static) | Lazy statics | MIT/Apache-2.0 |
 
 ## License
 
