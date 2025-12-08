@@ -27,6 +27,10 @@ pub struct Args {
     #[arg(long, default_value = "emails.db")]
     pub db: String,
 
+    /// HTTP request timeout in milliseconds
+    #[arg(short = 't', long, default_value_t = 30000)]
+    pub timeout: u64,
+
     /// Verbose output
     #[arg(short, long, default_value_t = false)]
     pub verbose: bool,
