@@ -54,6 +54,8 @@ couscous-crawler https://example.com -d 2 -s -w 15 -v --db results.db
 | [lazy_static](https://crates.io/crates/lazy_static) | Lazy statics | MIT/Apache-2.0 |
 | [yolo-face](https://github.com/YapaLab/yolo-face.git) | yolo face detection | GNU GPL V3.0 |
 | [ultralytics](https://github.com/ultralytics/ultralytics.git) | ultralytics | AGPL V3.0 |
+| [opencv-python](https://pypi.org/project/opencv-python/) | Computer vision & webcam | Apache-2.0 |
+| [pillow](https://pypi.org/project/pillow/) | Image processing for Tkinter | HPND |
 
 ## License
 
