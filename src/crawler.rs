@@ -1,13 +1,24 @@
 use crate::cli::Args;
 use crate::database::Database;
 use crate::extractor::{extract_emails, extract_links, is_same_domain};
+use colored::*;
+use rand::Rng;
 use reqwest::Client;
 use std::sync::Arc;
 use url::Url;
 
+// Common user agents for stealth
+const USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+];
+
 /// Crawler state
 pub struct Crawler {
-    client: Client,
     db: Arc<Database>,
     args: Args,
     base_domain: String,
@@ -22,13 +33,7 @@ impl Crawler {
             .ok_or("Invalid URL: no host")?
             .to_string();
 
-        let client = Client::builder()
-            .user_agent("CouscousCrawler/0.1")
-            .timeout(std::time::Duration::from_millis(args.timeout))
-            .build()?;
-
         Ok(Crawler {
-            client,
             db,
             args,
             base_domain,
@@ -59,13 +64,12 @@ impl Crawler {
         let mut handles = vec![];
         
         for _ in 0..self.args.workers {
-            let client = self.client.clone();
             let db = self.db.clone();
             let args = self.args.clone();
             let base_domain = self.base_domain.clone();
             
             handles.push(tokio::spawn(async move {
-                worker_loop(client, db, args, base_domain).await;
+                worker_loop(db, args, base_domain).await;
             }));
         }
 
@@ -78,8 +82,27 @@ impl Crawler {
     }
 }
 
+/// Create a stealthy HTTP client with random user agent
+fn create_stealth_client(timeout_ms: u64) -> Result<Client, reqwest::Error> {
+    let mut rng = rand::thread_rng();
+    let user_agent = USER_AGENTS[rng.gen_range(0..USER_AGENTS.len())];
+    
+    Client::builder()
+        .user_agent(user_agent)
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+}
+
+/// Random delay for stealth (50-200ms)
+async fn stealth_delay() {
+    let delay = {
+        let mut rng = rand::thread_rng();
+        rng.gen_range(50..200)
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+}
+
 async fn worker_loop(
-    client: Client,
     db: Arc<Database>,
     args: Args,
     base_domain: String,
@@ -93,7 +116,11 @@ async fn worker_loop(
         match task {
             Some((url, depth)) => {
                 idle_count = 0;
-                process_url(&client, &db, &args, &base_domain, &url, depth).await;
+                
+                // Stealth delay between requests
+                stealth_delay().await;
+                
+                process_url(&db, &args, &base_domain, &url, depth).await;
                 let _ = db.complete_url(&url);
             }
             None => {
@@ -112,7 +139,6 @@ async fn worker_loop(
 }
 
 async fn process_url(
-    client: &Client,
     db: &Arc<Database>,
     args: &Args,
     base_domain: &str,
@@ -126,7 +152,7 @@ async fn process_url(
     let _ = db.mark_visited(url);
 
     if args.verbose {
-        println!("[Crawling] {} (depth: {})", url, depth);
+        println!("{}", format!("[Crawling] {} (depth: {})", url, depth).white());
     }
 
     // Parse URL
@@ -135,12 +161,23 @@ async fn process_url(
         Err(_) => return,
     };
 
+    // Create a new client for each request (with random user agent)
+    let client = match create_stealth_client(args.timeout) {
+        Ok(c) => c,
+        Err(e) => {
+            if args.verbose {
+                eprintln!("{}", format!("[Error] {}: {}", url, e).red());
+            }
+            return;
+        }
+    };
+
     // Fetch the page
-    let html = match fetch_page(client, &parsed_url).await {
+    let html = match fetch_page(&client, &parsed_url).await {
         Ok(content) => content,
         Err(e) => {
             if args.verbose {
-                eprintln!("[Error] {}: {}", url, e);
+                eprintln!("{}", format!("[Error] {}: {}", url, e).red());
             }
             return;
         }
@@ -155,14 +192,14 @@ async fn process_url(
             Ok(false) => {}
             Err(e) => {
                 if args.verbose {
-                    eprintln!("[DB Error] {}", e);
+                    eprintln!("{}", format!("[DB Error] {}", e).red());
                 }
             }
         }
     }
 
     if !emails.is_empty() {
-        println!("Found {} emails ({} new) on {}", emails.len(), new_emails, url);
+        println!("{}", format!("Found {} emails ({} new) on {}", emails.len(), new_emails, url).green());
     }
 
     // Check depth limit
@@ -189,7 +226,15 @@ async fn process_url(
 }
 
 async fn fetch_page(client: &Client, url: &Url) -> Result<String, reqwest::Error> {
-    let response = client.get(url.as_str()).send().await?;
+    let response = client
+        .get(url.as_str())
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.5")
+        .header("Accept-Encoding", "gzip, deflate, br")
+        .header("Connection", "keep-alive")
+        .header("Upgrade-Insecure-Requests", "1")
+        .send()
+        .await?;
     
     // Only process HTML content
     if let Some(content_type) = response.headers().get("content-type") {
