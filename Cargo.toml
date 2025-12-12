@@ -10,7 +10,7 @@ authors = ["Arthur"]
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client
-reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+reqwest = { version = "0.11", features = ["rustls-tls", "gzip", "brotli", "deflate"], default-features = false }
 
 # HTML parsing
 scraper = "0.18"
@@ -29,6 +29,12 @@ lazy_static = "1"
 
 # URL parsing and manipulation
 url = "2"
+
+# Colored terminal output
+colored = "2"
+
+# Random for stealth delays and user agent rotation
+rand = "0.8"
 
 [profile.release]
 opt-level = 3
