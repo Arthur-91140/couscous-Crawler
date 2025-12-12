@@ -1,0 +1,90 @@
+---
+config:
+  theme: redux
+  layout: elk
+---
+flowchart BT
+ subgraph Crawler["Crawler"]
+    direction TB
+        A1["Start"]
+        B1{"URL dans la queue ?"}
+        L{"Idle depuis 500ms ?"}
+        M["Attendre 50ms"]
+        N["Fin"]
+        C1["Récupérer URL"]
+        D1{"Déjà visitée ?"}
+        E1["Fetch la page"]
+        F{"Requête OK ?"}
+        G1_1["Extraire les emails et source"]
+        G1_2["Extraire les téléphones et source"]
+        H1["Extraire les images"]
+        H2["Créer et associer UUID aux images"]
+        H3@{ label: "Renommer les images\nen fonction de l'uuid" }
+        A["Stockage images"]
+        H["Sauvegarder en BDD"]
+        I{"Profondeur max atteinte ?"}
+        J["Extraire les liens"]
+        K["Ajouter liens à la queue"]
+  end
+ subgraph Detection_des_visages["Détection_des_visages"]
+    direction TB
+        S2{"Le dossier contient-il une image ?"}
+        S1["Start"]
+        S5["Attendre 2 secondes"]
+        S3@{ label: "L'image contient-elle un visage ?" }
+        S4["Elle est déplacée dans le stockage."]
+  end
+    A1 --> B1
+    B1 -- Non --> L
+    L -- Non --> M
+    M --> B1
+    L -- Oui --> N
+    B1 -- Oui --> C1
+    C1 --> D1
+    D1 -- Oui --> B1
+    D1 -- Non --> E1
+    E1 --> F
+    F -- Non --> B1
+    F -- Oui --> H1 & G1_1
+    G1_1 --> G1_2
+    G1_2 --> H
+    H1 --> H2
+    H2 --> H3
+    H3 -- Sauvegarder les images dans le dossier --> A
+    H3 -- Sauvegarder UUID et Source en BDD --> H
+    H --> I
+    I -- Oui --> B1
+    I -- Non --> J
+    J --> K
+    K --> B1
+    S1 --> S2
+    S2 -- No --> S5
+    S5 --> S2
+    S2 -- Yes --> S3
+    S3 -- No --> S2
+    S3 -- Yes --> S4
+    S4 --> S2
+    A --> S1
+
+    H2@{ shape: subproc}
+    H3@{ shape: subproc}
+    H@{ shape: cyl}
+    S3@{ shape: diamond}
+     A1:::startend
+     B1:::decision
+     L:::decision
+     N:::startend
+     D1:::decision
+     F:::decision
+     H2:::subproc
+     H3:::subproc
+     H:::db
+     I:::decision
+     S2:::decision
+     S1:::startend
+     S3:::decision
+    classDef decision fill:#c7e2ff,stroke:#2b6cb0,stroke-width:2px,color:#003366
+    classDef subproc fill:#e9d6f6,stroke:#8434ba,stroke-width:2px,color:#321850
+    classDef db fill:#b5e7c0,stroke:#228b22,stroke-width:2px,color:#124021
+    classDef startend fill:#d1d5db,stroke:#888888,stroke-width:2px,color:#222
+    linkStyle 20 stroke:#000000
