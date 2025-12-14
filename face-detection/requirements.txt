@@ -1,3 +1,9 @@
-ultralytics>=8.0.0
+# Face Detection Dependencies
+# Install with: pip install -r requirements.txt
+
+ultralytics>=8.3.0
 opencv-python>=4.8.0
 pillow>=10.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+lap>=0.5.12
