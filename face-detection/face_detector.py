@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
+import numpy as np
+from collections import defaultdict
 from ultralytics import YOLO
 
 
@@ -30,12 +32,24 @@ class FaceDetector:
             'text_bg': (0, 255, 0),
             'text': (0, 0, 0)
         }
+        self.track_history = defaultdict(lambda: [])
+        self.last_results = None
     
     def detect(self, frame, use_tracking=False):
-        if use_tracking:
-            results = self.model.track(frame, conf=self.confidence, verbose=False, persist=True)
-        else:
+        try:
+            if use_tracking:
+                results = self.model.track(frame, conf=self.confidence, verbose=False, persist=True)
+            else:
+                results = self.model(frame, conf=self.confidence, verbose=False)
+        except Exception as e:
+            # Fallback to detect mode if tracking fails
+            print(f"Tracking error, falling back to detect: {e}")
             results = self.model(frame, conf=self.confidence, verbose=False)
+            use_tracking = False
+        
+        # Store results for plot() usage
+        self.last_results = results
+        
         detections = []
         
         for result in results:
@@ -47,10 +61,66 @@ class FaceDetector:
                     # Get track ID if available
                     track_id = None
                     if use_tracking and result.boxes.id is not None:
-                        track_id = int(result.boxes.id[i])
+                        try:
+                            track_id = int(result.boxes.id[i])
+                        except:
+                            pass
                     detections.append((int(x1), int(y1), int(x2), int(y2), conf, cls, track_id))
         
         return detections
+    
+    def get_annotated_frame(self, trail_length=30):
+        """Get the annotated frame using YOLO's native plot() method with trajectory lines."""
+        if self.last_results and len(self.last_results) > 0:
+            result = self.last_results[0]
+            annotated = result.plot()
+            
+            # Draw trajectory lines
+            if result.boxes is not None and result.boxes.id is not None:
+                boxes = result.boxes.xywh.cpu()
+                track_ids = result.boxes.id.int().cpu().tolist()
+                
+                # Color palette for trajectories
+                track_colors = [
+                    (255, 0, 255), (0, 255, 255), (255, 255, 0), (0, 255, 0),
+                    (255, 0, 0), (0, 0, 255), (255, 128, 0), (128, 0, 255),
+                    (0, 128, 255), (128, 255, 0), (255, 0, 128), (0, 255, 128)
+                ]
+                
+                for box, track_id in zip(boxes, track_ids):
+                    x, y, w, h = box
+                    track = self.track_history[track_id]
+                    track.append((float(x), float(y)))  # center point
+                    
+                    # Keep only last N points based on trail_length
+                    while len(track) > trail_length:
+                        track.pop(0)
+                    
+                    # Draw the trajectory line with smooth curves
+                    if len(track) > 2:
+                        color = track_colors[track_id % len(track_colors)]
+                        
+                        # Smooth the curve using interpolation
+                        points_array = np.array(track)
+                        if len(points_array) >= 4:
+                            try:
+                                # Use spline interpolation for smooth curves
+                                from scipy.interpolate import splprep, splev
+                                tck, u = splprep([points_array[:, 0], points_array[:, 1]], s=5, k=min(3, len(points_array)-1))
+                                u_new = np.linspace(0, 1, len(points_array) * 3)
+                                smooth_x, smooth_y = splev(u_new, tck)
+                                smooth_points = np.column_stack((smooth_x, smooth_y)).astype(np.int32)
+                                cv2.polylines(annotated, [smooth_points], isClosed=False, color=color, thickness=3, lineType=cv2.LINE_AA)
+                            except:
+                                # Fallback to regular polylines
+                                points = np.array(track, dtype=np.int32).reshape((-1, 1, 2))
+                                cv2.polylines(annotated, [points], isClosed=False, color=color, thickness=3, lineType=cv2.LINE_AA)
+                        else:
+                            points = np.array(track, dtype=np.int32).reshape((-1, 1, 2))
+                            cv2.polylines(annotated, [points], isClosed=False, color=color, thickness=3, lineType=cv2.LINE_AA)
+            
+            return annotated
+        return None
     
     def draw_detections(self, frame, detections, show_confidence=True, box_thickness=2, show_track_id=False):
         annotated = frame.copy()
@@ -191,13 +261,14 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             self.root = root
             self.root.title("Face Detection - YOLOv12")
             self.root.configure(bg='#1a1a2e')
-            self.root.geometry("1100x800")
-            self.root.minsize(900, 700)
+            self.root.geometry("1200x900")
+            self.root.minsize(1000, 850)
             
             # State variables
             self.running = False
             self.detector = None
             self.cap = None
+            self.video_writer = None
             self.current_frame = None
             self.fps = 0
             self.fps_counter = 0
@@ -215,7 +286,6 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             self.output_dir = tk.StringVar(value=str(Path.home() / "face_detection_output"))
             self.box_thickness = tk.IntVar(value=2)
             self.crop_padding = tk.IntVar(value=10)
-            self.continuous_mode = tk.BooleanVar(value=True)
             self.file_action = tk.StringVar(value="display")
             self.input_path = tk.StringVar(value="")
             
@@ -236,6 +306,18 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             # Detection mode (detect or track)
             self.detection_mode = tk.StringVar(value="detect")
+            
+            # Trajectory settings
+            self.trail_length = tk.IntVar(value=30)
+            
+            # Video recording (always enabled for webcam/ipcam/video)
+            self.record_video = tk.BooleanVar(value=False)
+            self.video_fps = tk.IntVar(value=20)
+            self.auto_fps = tk.BooleanVar(value=True)  # Use source FPS
+            
+            # Folder processing options
+            self.delete_after_process = tk.BooleanVar(value=False)
+            self.loop_folder = tk.BooleanVar(value=False)
             
             self.setup_styles()
             self.setup_ui()
@@ -283,12 +365,23 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             content = ttk.Frame(main_frame)
             content.pack(fill=tk.BOTH, expand=True)
             
-            # Left panel - Configuration
-            left_panel = ttk.Frame(content, width=350)
-            left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+            # Left panels container - two columns
+            left_container = ttk.Frame(content)
+            left_container.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+            
+            # Left panel 1 - Configuration
+            left_panel = ttk.Frame(left_container, width=280)
+            left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
             left_panel.pack_propagate(False)
             
             self.setup_config_panel(left_panel)
+            
+            # Left panel 2 - Output options
+            left_panel2 = ttk.Frame(left_container, width=250)
+            left_panel2.pack(side=tk.LEFT, fill=tk.Y, padx=(5, 0))
+            left_panel2.pack_propagate(False)
+            
+            self.setup_output_panel(left_panel2)
             
             # Right panel - Preview and output
             right_panel = ttk.Frame(content)
@@ -301,6 +394,9 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             bottom_frame.pack(fill=tk.X, pady=(10, 0))
             
             self.setup_controls(bottom_frame)
+            
+            # Update UI based on initial mode (after all panels created)
+            self.on_mode_change()
         
         def setup_config_panel(self, parent):
             """Setup the configuration panel."""
@@ -418,6 +514,15 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             ttk.Radiobutton(mode_select_frame, text="Track", variable=self.detection_mode, 
                            value="track").pack(side=tk.LEFT, padx=5)
             
+            # Trail length for tracking
+            trail_frame = ttk.Frame(detect_frame)
+            trail_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(trail_frame, text="Longueur trajectoire:").pack(side=tk.LEFT)
+            ttk.Spinbox(trail_frame, from_=5, to=200, textvariable=self.trail_length, 
+                       width=5).pack(side=tk.RIGHT)
+        
+        def setup_output_panel(self, parent):
+            """Setup the output options panel."""
             # Output Settings
             output_frame = ttk.LabelFrame(parent, text="💾 Sortie", padding="10")
             output_frame.pack(fill=tk.X, pady=(0, 10))
@@ -454,25 +559,43 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             dir_input = ttk.Frame(dir_frame)
             dir_input.pack(fill=tk.X)
-            ttk.Entry(dir_input, textvariable=self.output_dir, width=25).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ttk.Entry(dir_input, textvariable=self.output_dir, width=20).pack(side=tk.LEFT, fill=tk.X, expand=True)
             ttk.Button(dir_input, text="...", width=3, 
                       command=self.browse_output_dir).pack(side=tk.RIGHT, padx=(5, 0))
             
-            # Video/Continuous options
-            cont_frame = ttk.LabelFrame(parent, text="🔄 Options Continu", padding="10")
-            cont_frame.pack(fill=tk.X, pady=(0, 10))
+            # Video Recording options
+            video_frame = ttk.LabelFrame(parent, text="Enregistrement Vidéo", padding="10")
+            video_frame.pack(fill=tk.X, pady=(0, 10))
             
-            ttk.Checkbutton(cont_frame, text="Mode continu (vidéo/webcam)", 
-                           variable=self.continuous_mode).pack(anchor=tk.W, pady=2)
+            ttk.Checkbutton(video_frame, text="Enregistrer la vidéo", 
+                           variable=self.record_video).pack(anchor=tk.W, pady=2)
             
-            # Update UI based on initial mode
-            self.on_mode_change()
+            # Auto FPS option
+            ttk.Checkbutton(video_frame, text="FPS Auto (source)", 
+                           variable=self.auto_fps).pack(anchor=tk.W, pady=2)
+            
+            # Video FPS (manual)
+            fps_frame = ttk.Frame(video_frame)
+            fps_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(fps_frame, text="FPS manuel:").pack(side=tk.LEFT)
+            ttk.Spinbox(fps_frame, from_=5, to=60, textvariable=self.video_fps, 
+                       width=5).pack(side=tk.RIGHT)
+            
+            # Folder processing options
+            folder_frame = ttk.LabelFrame(parent, text="📁 Options Dossier", padding="10")
+            folder_frame.pack(fill=tk.X, pady=(0, 10))
+            
+            ttk.Checkbutton(folder_frame, text="Supprimer après traitement", 
+                           variable=self.delete_after_process).pack(anchor=tk.W, pady=2)
+            ttk.Checkbutton(folder_frame, text="Boucle continue", 
+                           variable=self.loop_folder).pack(anchor=tk.W, pady=2)
         
         def setup_preview_panel(self, parent):
             """Setup the preview panel."""
             # Preview frame with border
             preview_container = ttk.Frame(parent, style='Card.TFrame')
             preview_container.pack(fill=tk.BOTH, expand=True)
+            preview_container.pack_propagate(False)  # Prevent auto-resize
             
             self.video_label = tk.Label(preview_container, bg='#16213e')
             self.video_label.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
@@ -699,12 +822,19 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                     # Detect and draw
                     use_tracking = self.detection_mode.get() == "track"
                     detections = self.detector.detect(frame, use_tracking=use_tracking)
-                    annotated = self.detector.draw_detections(
-                        frame, detections,
-                        show_confidence=self.show_confidence.get(),
-                        box_thickness=self.box_thickness.get(),
-                        show_track_id=use_tracking
-                    )
+                    
+                    # Use YOLO's native plot() for tracking visualization
+                    if use_tracking:
+                        annotated = self.detector.get_annotated_frame(trail_length=self.trail_length.get())
+                        if annotated is None:
+                            annotated = frame.copy()
+                    else:
+                        annotated = self.detector.draw_detections(
+                            frame, detections,
+                            show_confidence=self.show_confidence.get(),
+                            box_thickness=self.box_thickness.get(),
+                            show_track_id=False
+                        )
                     
                     self.current_frame = annotated
                     self.total_faces_detected += len(detections)
@@ -747,10 +877,23 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             self.fps_counter = 0
             self.fps_start = time.time()
             
+            # Initialize video writer if recording enabled
+            if self.record_video.get():
+                output_dir = self.ensure_output_dir()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                video_path = output_dir / f"recording_{timestamp}.mp4"
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                fps = self.video_fps.get()
+                frame_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                frame_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                self.video_writer = cv2.VideoWriter(str(video_path), fourcc, fps, (frame_w, frame_h))
+                self.status_label.configure(text=f"Enregistrement: {video_path.name}")
+            
             self.start_btn.configure(state=tk.DISABLED)
             self.stop_btn.configure(state=tk.NORMAL)
             self.screenshot_btn.configure(state=tk.NORMAL)
-            self.status_label.configure(text="Status: En cours")
+            if not self.record_video.get():
+                self.status_label.configure(text="Status: En cours")
             
             self.update_webcam_frame()
         
@@ -767,15 +910,26 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             # Detect and draw
             use_tracking = self.detection_mode.get() == "track"
             detections = self.detector.detect(frame, use_tracking=use_tracking)
-            annotated = self.detector.draw_detections(
-                frame, detections, 
-                show_confidence=self.show_confidence.get(),
-                box_thickness=self.box_thickness.get(),
-                show_track_id=use_tracking
-            )
+            
+            # Use YOLO's native plot() for tracking visualization
+            if use_tracking:
+                annotated = self.detector.get_annotated_frame(trail_length=self.trail_length.get())
+                if annotated is None:
+                    annotated = frame.copy()
+            else:
+                annotated = self.detector.draw_detections(
+                    frame, detections, 
+                    show_confidence=self.show_confidence.get(),
+                    box_thickness=self.box_thickness.get(),
+                    show_track_id=False
+                )
             
             self.current_frame = annotated
             self.total_faces_detected += len(detections)
+            
+            # Write frame to video if recording
+            if self.video_writer is not None:
+                self.video_writer.write(annotated)
             
             # Save crops if enabled
             if self.save_crops.get() and detections:
@@ -791,6 +945,10 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             self.faces_label.configure(text=f"Visages: {len(detections)}")
             self.total_label.configure(text=f"Total détecté: {self.total_faces_detected}")
+            
+            # Show current mode in status
+            mode_text = "TRACK" if use_tracking else "DETECT"
+            self.status_label.configure(text=f"Mode: {mode_text}")
             
             # Display frame
             self.display_frame(annotated)
@@ -812,12 +970,19 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             use_tracking = self.detection_mode.get() == "track"
             detections = self.detector.detect(frame, use_tracking=use_tracking)
-            annotated = self.detector.draw_detections(
-                frame, detections,
-                show_confidence=self.show_confidence.get(),
-                box_thickness=self.box_thickness.get(),
-                show_track_id=use_tracking
-            )
+            
+            # Use YOLO's native plot() for tracking visualization
+            if use_tracking:
+                annotated = self.detector.get_annotated_frame(trail_length=self.trail_length.get())
+                if annotated is None:
+                    annotated = frame.copy()
+            else:
+                annotated = self.detector.draw_detections(
+                    frame, detections,
+                    show_confidence=self.show_confidence.get(),
+                    box_thickness=self.box_thickness.get(),
+                    show_track_id=False
+                )
             
             self.current_frame = annotated
             self.total_faces_detected += len(detections)
@@ -877,12 +1042,19 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                 
                 use_tracking = self.detection_mode.get() == "track"
                 detections = self.detector.detect(frame, use_tracking=use_tracking)
-                annotated = self.detector.draw_detections(
-                    frame, detections,
-                    show_confidence=self.show_confidence.get(),
-                    box_thickness=self.box_thickness.get(),
-                    show_track_id=use_tracking
-                )
+                
+                # Use YOLO's native plot() for tracking visualization
+                if use_tracking:
+                    annotated = self.detector.get_annotated_frame(trail_length=self.trail_length.get())
+                    if annotated is None:
+                        annotated = frame.copy()
+                else:
+                    annotated = self.detector.draw_detections(
+                        frame, detections,
+                        show_confidence=self.show_confidence.get(),
+                        box_thickness=self.box_thickness.get(),
+                        show_track_id=False
+                    )
                 
                 self.current_frame = annotated
                 self.processed_files += 1
@@ -901,13 +1073,24 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                 if self.save_crops.get() and detections:
                     self.save_face_crops(frame, detections, prefix=file_path.stem)
                 
+                # Delete original file after processing if enabled
+                if self.delete_after_process.get():
+                    try:
+                        file_path.unlink()
+                    except Exception as e:
+                        print(f"Erreur suppression {file_path}: {e}")
+                
                 self.faces_label.configure(text=f"Visages: {len(detections)}")
                 self.total_label.configure(text=f"Total: {self.total_faces_detected}")
                 
                 self.root.update()
             
-            self.stop_detection()
-            self.status_label.configure(text=f"Terminé: {self.processed_files} fichiers")
+            # Check if loop is enabled and restart
+            if self.loop_folder.get() and self.running:
+                self.root.after(100, self.process_folder)
+            else:
+                self.stop_detection()
+                self.status_label.configure(text=f"Terminé: {self.processed_files} fichiers")
         
         def process_video(self):
             """Process a video file."""
@@ -925,10 +1108,32 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             self.fps_counter = 0
             self.fps_start = time.time()
             
+            # Initialize video writer if recording enabled
+            if self.record_video.get():
+                output_dir = self.ensure_output_dir()
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                video_name = Path(path).stem
+                video_path = output_dir / f"detected_{video_name}_{timestamp}.mp4"
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                
+                # Use source FPS if auto_fps is enabled
+                if self.auto_fps.get():
+                    fps = self.cap.get(cv2.CAP_PROP_FPS)
+                    if fps <= 0:
+                        fps = 30  # Default fallback
+                else:
+                    fps = self.video_fps.get()
+                
+                frame_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                frame_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                self.video_writer = cv2.VideoWriter(str(video_path), fourcc, fps, (frame_w, frame_h))
+                self.status_label.configure(text=f"Enregistrement: {video_path.name}")
+            
             self.start_btn.configure(state=tk.DISABLED)
             self.stop_btn.configure(state=tk.NORMAL)
             self.screenshot_btn.configure(state=tk.NORMAL)
-            self.status_label.configure(text="Status: Lecture vidéo")
+            if not self.record_video.get():
+                self.status_label.configure(text="Status: Lecture vidéo")
             
             self.update_video_frame()
         
@@ -939,28 +1144,32 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             ret, frame = self.cap.read()
             if not ret:
-                if self.continuous_mode.get():
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame = self.cap.read()
-                    if not ret:
-                        self.stop_detection()
-                        return
-                else:
-                    self.stop_detection()
-                    self.status_label.configure(text="Status: Vidéo terminée")
-                    return
+                self.stop_detection()
+                self.status_label.configure(text="Status: Vidéo terminée")
+                return
             
             use_tracking = self.detection_mode.get() == "track"
             detections = self.detector.detect(frame, use_tracking=use_tracking)
-            annotated = self.detector.draw_detections(
-                frame, detections,
-                show_confidence=self.show_confidence.get(),
-                box_thickness=self.box_thickness.get(),
-                show_track_id=use_tracking
-            )
+            
+            # Use YOLO's native plot() for tracking visualization
+            if use_tracking:
+                annotated = self.detector.get_annotated_frame(trail_length=self.trail_length.get())
+                if annotated is None:
+                    annotated = frame.copy()
+            else:
+                annotated = self.detector.draw_detections(
+                    frame, detections,
+                    show_confidence=self.show_confidence.get(),
+                    box_thickness=self.box_thickness.get(),
+                    show_track_id=False
+                )
             
             self.current_frame = annotated
             self.total_faces_detected += len(detections)
+            
+            # Write frame to video if recording
+            if self.video_writer is not None:
+                self.video_writer.write(annotated)
             
             # Update stats
             self.fps_counter += 1
@@ -1032,6 +1241,12 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             if self.cap:
                 self.cap.release()
                 self.cap = None
+            
+            # Release video writer if recording
+            if self.video_writer is not None:
+                self.video_writer.release()
+                self.video_writer = None
+                messagebox.showinfo("Enregistrement", "Vidéo enregistrée avec succès!")
             
             self.start_btn.configure(state=tk.NORMAL)
             self.stop_btn.configure(state=tk.DISABLED)
