@@ -56,6 +56,9 @@ couscous-crawler https://example.com -d 2 -s -w 15 -v --db results.db
 | [ultralytics](https://github.com/ultralytics/ultralytics.git) | ultralytics | AGPL V3.0 |
 | [opencv-python](https://pypi.org/project/opencv-python/) | Computer vision & webcam | Apache-2.0 |
 | [pillow](https://pypi.org/project/pillow/) | Image processing for Tkinter | HPND |
+| [numpy](https://pypi.org/project/numpy/) | Array computing | BSD-3-Clause |
+| [scipy](https://pypi.org/project/scipy/) | Scientific computing (splines) | BSD-3-Clause |
+| [lap](https://pypi.org/project/lap/) | Linear assignment for tracking | BSD-2-Clause |
 
 ## License
 
