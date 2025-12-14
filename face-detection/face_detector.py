@@ -31,28 +31,57 @@ class FaceDetector:
             'text': (0, 0, 0)
         }
     
-    def detect(self, frame):
-        results = self.model(frame, conf=self.confidence, verbose=False)
+    def detect(self, frame, use_tracking=False):
+        if use_tracking:
+            results = self.model.track(frame, conf=self.confidence, verbose=False, persist=True)
+        else:
+            results = self.model(frame, conf=self.confidence, verbose=False)
         detections = []
         
         for result in results:
             if result.boxes is not None:
-                for box in result.boxes:
+                for i, box in enumerate(result.boxes):
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     conf = float(box.conf[0])
                     cls = int(box.cls[0])
-                    detections.append((int(x1), int(y1), int(x2), int(y2), conf, cls))
+                    # Get track ID if available
+                    track_id = None
+                    if use_tracking and result.boxes.id is not None:
+                        track_id = int(result.boxes.id[i])
+                    detections.append((int(x1), int(y1), int(x2), int(y2), conf, cls, track_id))
         
         return detections
     
-    def draw_detections(self, frame, detections, show_confidence=True, box_thickness=2):
+    def draw_detections(self, frame, detections, show_confidence=True, box_thickness=2, show_track_id=False):
         annotated = frame.copy()
         
-        for (x1, y1, x2, y2, conf, cls) in detections:
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), self.colors['box'], box_thickness)
+        # Color palette for tracking
+        track_colors = [
+            (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+            (255, 0, 255), (0, 255, 255), (128, 0, 255), (255, 128, 0),
+            (0, 128, 255), (128, 255, 0), (255, 0, 128), (0, 255, 128)
+        ]
+        
+        for detection in detections:
+            x1, y1, x2, y2, conf, cls = detection[:6]
+            track_id = detection[6] if len(detection) > 6 else None
             
-            if show_confidence:
-                label = f"Face {conf:.2f}"
+            # Choose color based on track ID or default
+            if track_id is not None and show_track_id:
+                color = track_colors[track_id % len(track_colors)]
+            else:
+                color = self.colors['box']
+            
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, box_thickness)
+            
+            if show_confidence or (show_track_id and track_id is not None):
+                parts = []
+                if show_track_id and track_id is not None:
+                    parts.append(f"ID:{track_id}")
+                if show_confidence:
+                    parts.append(f"{conf:.2f}")
+                label = " ".join(parts)
+                
                 (label_w, label_h), baseline = cv2.getTextSize(
                     label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
                 )
@@ -60,7 +89,7 @@ class FaceDetector:
                     annotated,
                     (x1, y1 - label_h - 10),
                     (x1 + label_w + 5, y1),
-                    self.colors['text_bg'],
+                    color,
                     -1
                 )
                 cv2.putText(
@@ -69,7 +98,7 @@ class FaceDetector:
                     (x1 + 2, y1 - 5),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    self.colors['text'],
+                    (255, 255, 255),
                     2
                 )
         
@@ -190,6 +219,12 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             self.file_action = tk.StringVar(value="display")
             self.input_path = tk.StringVar(value="")
             
+            # IP Camera settings
+            self.ip_address = tk.StringVar(value="10.137.84.153")
+            self.ip_port = tk.StringVar(value="8080")
+            self.ip_stream_type = tk.StringVar(value="mjpeg")  # mjpeg or shot
+            self.shot_interval = tk.IntVar(value=100)  # ms between shot.jpg requests
+            
             # Model selection
             self.available_models = [
                 "yolov12n-face.pt",
@@ -198,6 +233,9 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                 "yolov12l-face.pt"
             ]
             self.selected_model = tk.StringVar(value="yolov12n-face.pt")
+            
+            # Detection mode (detect or track)
+            self.detection_mode = tk.StringVar(value="detect")
             
             self.setup_styles()
             self.setup_ui()
@@ -272,6 +310,7 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             modes = [
                 ("Webcam (continu)", "webcam"),
+                ("Caméra IP (MJPEG)", "ipcam"),
                 ("Fichier image", "file"),
                 ("Dossier d'images", "folder"),
                 ("Fichier vidéo", "video")
@@ -293,6 +332,33 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             self.camera_spin = ttk.Spinbox(self.camera_frame, from_=0, to=10, 
                                            textvariable=self.camera_id, width=5)
             self.camera_spin.pack(side=tk.RIGHT)
+            
+            # IP Camera settings (for ipcam mode)
+            self.ipcam_frame = ttk.Frame(input_frame)
+            
+            # IP Address row
+            ip_row = ttk.Frame(self.ipcam_frame)
+            ip_row.pack(fill=tk.X, pady=2)
+            ttk.Label(ip_row, text="IP:").pack(side=tk.LEFT)
+            ttk.Entry(ip_row, textvariable=self.ip_address, width=15).pack(side=tk.LEFT, padx=5)
+            ttk.Label(ip_row, text="Port:").pack(side=tk.LEFT)
+            ttk.Entry(ip_row, textvariable=self.ip_port, width=6).pack(side=tk.LEFT, padx=5)
+            
+            # Stream type row
+            stream_row = ttk.Frame(self.ipcam_frame)
+            stream_row.pack(fill=tk.X, pady=2)
+            ttk.Label(stream_row, text="Type:").pack(side=tk.LEFT)
+            ttk.Radiobutton(stream_row, text="MJPEG (/video)", variable=self.ip_stream_type, 
+                           value="mjpeg").pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(stream_row, text="Shot (/shot.jpg)", variable=self.ip_stream_type, 
+                           value="shot").pack(side=tk.LEFT, padx=5)
+            
+            # Shot interval row
+            interval_row = ttk.Frame(self.ipcam_frame)
+            interval_row.pack(fill=tk.X, pady=2)
+            ttk.Label(interval_row, text="Intervalle shot (ms):").pack(side=tk.LEFT)
+            ttk.Spinbox(interval_row, from_=50, to=5000, textvariable=self.shot_interval, 
+                       width=6).pack(side=tk.RIGHT)
             
             # File/Folder selection (for file modes)
             self.file_frame = ttk.Frame(input_frame)
@@ -342,6 +408,15 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             # Show confidence checkbox
             ttk.Checkbutton(detect_frame, text="Afficher confiance", 
                            variable=self.show_confidence).pack(anchor=tk.W, pady=2)
+            
+            # Detection mode selection (detect vs track)
+            mode_select_frame = ttk.Frame(detect_frame)
+            mode_select_frame.pack(fill=tk.X, pady=5)
+            ttk.Label(mode_select_frame, text="Mode:").pack(side=tk.LEFT)
+            ttk.Radiobutton(mode_select_frame, text="Detect", variable=self.detection_mode, 
+                           value="detect").pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(mode_select_frame, text="Track", variable=self.detection_mode, 
+                           value="track").pack(side=tk.LEFT, padx=5)
             
             # Output Settings
             output_frame = ttk.LabelFrame(parent, text="💾 Sortie", padding="10")
@@ -459,13 +534,18 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             """Handle mode selection change."""
             mode = self.mode.get()
             
-            # Show/hide camera frame
+            # Hide all input frames first
+            self.camera_frame.pack_forget()
+            self.ipcam_frame.pack_forget()
+            self.file_frame.pack_forget()
+            self.action_frame.pack_forget()
+            
+            # Show appropriate frame
             if mode == "webcam":
                 self.camera_frame.pack(fill=tk.X, pady=2)
-                self.file_frame.pack_forget()
-                self.action_frame.pack_forget()
+            elif mode == "ipcam":
+                self.ipcam_frame.pack(fill=tk.X, pady=2)
             else:
-                self.camera_frame.pack_forget()
                 self.file_frame.pack(fill=tk.X, pady=2)
                 self.action_frame.pack(fill=tk.X, pady=5)
         
@@ -543,12 +623,115 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             if mode == "webcam":
                 self.start_webcam()
+            elif mode == "ipcam":
+                self.start_ipcam()
             elif mode == "file":
                 self.process_file()
             elif mode == "folder":
                 self.process_folder()
             elif mode == "video":
                 self.process_video()
+        
+        def get_ipcam_url(self):
+            """Build IP camera URL based on settings."""
+            ip = self.ip_address.get()
+            port = self.ip_port.get()
+            stream_type = self.ip_stream_type.get()
+            
+            if stream_type == "mjpeg":
+                return f"http://{ip}:{port}/video"
+            else:
+                return f"http://{ip}:{port}/shot.jpg"
+        
+        def start_ipcam(self):
+            """Start IP camera detection."""
+            stream_type = self.ip_stream_type.get()
+            url = self.get_ipcam_url()
+            
+            if stream_type == "mjpeg":
+                # MJPEG stream - use OpenCV VideoCapture
+                self.cap = cv2.VideoCapture(url)
+                if not self.cap.isOpened():
+                    messagebox.showerror("Erreur", f"Impossible de se connecter \u00e0 {url}")
+                    return
+                
+                self.running = True
+                self.fps_counter = 0
+                self.fps_start = time.time()
+                
+                self.start_btn.configure(state=tk.DISABLED)
+                self.stop_btn.configure(state=tk.NORMAL)
+                self.screenshot_btn.configure(state=tk.NORMAL)
+                self.status_label.configure(text=f"IP Cam: {url}")
+                
+                self.update_webcam_frame()
+            else:
+                # Shot mode - fetch individual frames
+                self.running = True
+                self.fps_counter = 0
+                self.fps_start = time.time()
+                
+                self.start_btn.configure(state=tk.DISABLED)
+                self.stop_btn.configure(state=tk.NORMAL)
+                self.screenshot_btn.configure(state=tk.NORMAL)
+                self.status_label.configure(text=f"IP Cam Shot: {url}")
+                
+                self.update_ipcam_shot()
+        
+        def update_ipcam_shot(self):
+            """Update frame from IP camera shot.jpg endpoint."""
+            import urllib.request
+            import numpy as np
+            
+            if not self.running:
+                return
+            
+            try:
+                url = self.get_ipcam_url()
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    img_array = np.asarray(bytearray(response.read()), dtype=np.uint8)
+                    frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                    
+                    if frame is None:
+                        self.root.after(100, self.update_ipcam_shot)
+                        return
+                    
+                    # Detect and draw
+                    use_tracking = self.detection_mode.get() == "track"
+                    detections = self.detector.detect(frame, use_tracking=use_tracking)
+                    annotated = self.detector.draw_detections(
+                        frame, detections,
+                        show_confidence=self.show_confidence.get(),
+                        box_thickness=self.box_thickness.get(),
+                        show_track_id=use_tracking
+                    )
+                    
+                    self.current_frame = annotated
+                    self.total_faces_detected += len(detections)
+                    
+                    # Save crops if enabled
+                    if self.save_crops.get() and detections:
+                        self.save_face_crops(frame, detections)
+                    
+                    # Update stats
+                    self.fps_counter += 1
+                    if time.time() - self.fps_start >= 1.0:
+                        self.fps = self.fps_counter
+                        self.fps_counter = 0
+                        self.fps_start = time.time()
+                        self.fps_label.configure(text=f"FPS: {self.fps}")
+                    
+                    self.faces_label.configure(text=f"Visages: {len(detections)}")
+                    self.total_label.configure(text=f"Total détecté: {self.total_faces_detected}")
+                    
+                    # Display frame
+                    self.display_frame(annotated)
+                    
+            except Exception as e:
+                self.status_label.configure(text=f"Erreur: {str(e)[:30]}")
+            
+            # Schedule next update (slower for shot mode)
+            self.root.after(self.shot_interval.get(), self.update_ipcam_shot)
         
         def start_webcam(self):
             """Start webcam detection."""
@@ -582,11 +765,13 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                 return
             
             # Detect and draw
-            detections = self.detector.detect(frame)
+            use_tracking = self.detection_mode.get() == "track"
+            detections = self.detector.detect(frame, use_tracking=use_tracking)
             annotated = self.detector.draw_detections(
                 frame, detections, 
                 show_confidence=self.show_confidence.get(),
-                box_thickness=self.box_thickness.get()
+                box_thickness=self.box_thickness.get(),
+                show_track_id=use_tracking
             )
             
             self.current_frame = annotated
@@ -625,11 +810,13 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                 messagebox.showerror("Erreur", "Impossible de lire l'image.")
                 return
             
-            detections = self.detector.detect(frame)
+            use_tracking = self.detection_mode.get() == "track"
+            detections = self.detector.detect(frame, use_tracking=use_tracking)
             annotated = self.detector.draw_detections(
                 frame, detections,
                 show_confidence=self.show_confidence.get(),
-                box_thickness=self.box_thickness.get()
+                box_thickness=self.box_thickness.get(),
+                show_track_id=use_tracking
             )
             
             self.current_frame = annotated
@@ -688,11 +875,13 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                 if frame is None:
                     continue
                 
-                detections = self.detector.detect(frame)
+                use_tracking = self.detection_mode.get() == "track"
+                detections = self.detector.detect(frame, use_tracking=use_tracking)
                 annotated = self.detector.draw_detections(
                     frame, detections,
                     show_confidence=self.show_confidence.get(),
-                    box_thickness=self.box_thickness.get()
+                    box_thickness=self.box_thickness.get(),
+                    show_track_id=use_tracking
                 )
                 
                 self.current_frame = annotated
@@ -761,11 +950,13 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                     self.status_label.configure(text="Status: Vidéo terminée")
                     return
             
-            detections = self.detector.detect(frame)
+            use_tracking = self.detection_mode.get() == "track"
+            detections = self.detector.detect(frame, use_tracking=use_tracking)
             annotated = self.detector.draw_detections(
                 frame, detections,
                 show_confidence=self.show_confidence.get(),
-                box_thickness=self.box_thickness.get()
+                box_thickness=self.box_thickness.get(),
+                show_track_id=use_tracking
             )
             
             self.current_frame = annotated
