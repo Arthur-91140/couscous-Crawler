@@ -9,6 +9,7 @@ import argparse
 import os
 import sys
 import time
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -32,8 +33,18 @@ class FaceDetector:
             'text_bg': (0, 255, 0),
             'text': (0, 0, 0)
         }
+        self.random_colors = False
         self.track_history = defaultdict(lambda: [])
         self.last_results = None
+    
+    def set_box_color(self, color):
+        """Set the box color (BGR format)."""
+        self.colors['box'] = color
+        self.colors['text_bg'] = color
+    
+    def generate_random_color(self):
+        """Generate a random vibrant color."""
+        return (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255))
     
     def detect(self, frame, use_tracking=False):
         try:
@@ -136,8 +147,10 @@ class FaceDetector:
             x1, y1, x2, y2, conf, cls = detection[:6]
             track_id = detection[6] if len(detection) > 6 else None
             
-            # Choose color based on track ID or default
-            if track_id is not None and show_track_id:
+            # Choose color based on settings
+            if self.random_colors:
+                color = self.generate_random_color()
+            elif track_id is not None and show_track_id:
                 color = track_colors[track_id % len(track_colors)]
             else:
                 color = self.colors['box']
@@ -253,7 +266,7 @@ def run_cli(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
 def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None):
     """Run face detection with advanced Tkinter GUI."""
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
+    from tkinter import ttk, filedialog, messagebox, colorchooser
     from PIL import Image, ImageTk
     
     class FaceDetectionApp:
@@ -309,6 +322,11 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             
             # Trajectory settings
             self.trail_length = tk.IntVar(value=30)
+            
+            # Box color settings
+            self.box_color = (0, 255, 0)  # Default green (BGR)
+            self.box_color_hex = "#00ff00"  # For display
+            self.random_colors = tk.BooleanVar(value=False)
             
             # Video recording (always enabled for webcam/ipcam/video)
             self.record_video = tk.BooleanVar(value=False)
@@ -520,6 +538,19 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             ttk.Label(trail_frame, text="Longueur trajectoire:").pack(side=tk.LEFT)
             ttk.Spinbox(trail_frame, from_=5, to=200, textvariable=self.trail_length, 
                        width=5).pack(side=tk.RIGHT)
+            
+            # Box color selection
+            color_frame = ttk.Frame(detect_frame)
+            color_frame.pack(fill=tk.X, pady=5)
+            ttk.Label(color_frame, text="Couleur cadre:").pack(side=tk.LEFT)
+            self.color_btn = tk.Button(color_frame, bg=self.box_color_hex, width=3,
+                                       command=self.choose_box_color, relief=tk.RAISED)
+            self.color_btn.pack(side=tk.RIGHT, padx=5)
+            
+            # Random colors checkbox
+            ttk.Checkbutton(detect_frame, text="Couleurs aléatoires", 
+                           variable=self.random_colors,
+                           command=self.on_random_colors_change).pack(anchor=tk.W, pady=2)
         
         def setup_output_panel(self, parent):
             """Setup the output options panel."""
@@ -686,6 +717,27 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
             if self.detector:
                 self.detector.confidence = conf
         
+        def choose_box_color(self):
+            """Open color chooser dialog for box color."""
+            color = colorchooser.askcolor(
+                title="Choisir la couleur du cadre",
+                initialcolor=self.box_color_hex
+            )
+            if color[1]:  # color is ((R, G, B), '#hexcode')
+                self.box_color_hex = color[1]
+                # Convert RGB to BGR for OpenCV
+                r, g, b = color[0]
+                self.box_color = (int(b), int(g), int(r))
+                self.color_btn.configure(bg=self.box_color_hex)
+                # Update detector if running
+                if self.detector:
+                    self.detector.set_box_color(self.box_color)
+        
+        def on_random_colors_change(self):
+            """Handle random colors checkbox change."""
+            if self.detector:
+                self.detector.random_colors = self.random_colors.get()
+        
         def browse_input(self):
             """Open file/folder browser based on mode."""
             mode = self.mode.get()
@@ -743,6 +795,10 @@ def run_gui(camera_id: int = 0, confidence: float = 0.5, model_path: str = None)
                 self.detector = FaceDetector(str(selected_model_path), self.confidence.get())
             else:
                 self.detector.confidence = self.confidence.get()
+            
+            # Apply color settings
+            self.detector.set_box_color(self.box_color)
+            self.detector.random_colors = self.random_colors.get()
             
             if mode == "webcam":
                 self.start_webcam()
