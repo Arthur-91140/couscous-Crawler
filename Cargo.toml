@@ -36,6 +36,15 @@ colored = "2"
 # Random for stealth delays and user agent rotation
 rand = "0.8"
 
+# UUID generation for image naming
+uuid = { version = "1", features = ["v4"] }
+
+# Progress bar for downloads
+indicatif = "0.17"
+
+# Async utilities
+futures = "0.3"
+
 [profile.release]
 opt-level = 3
 lto = true

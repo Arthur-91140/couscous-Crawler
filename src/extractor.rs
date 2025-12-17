@@ -7,6 +7,18 @@ lazy_static::lazy_static! {
     static ref EMAIL_REGEX: Regex = Regex::new(
         r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
     ).unwrap();
+
+    // French phone number patterns
+    // Supports: +33 01 02 03 04 05, 0102030405, +330102030405, 01 02 03 04 05, etc.
+    static ref PHONE_REGEX: Regex = Regex::new(
+        r"(?x)
+        (?:
+            (?:\+33\s?|0)           # +33 (with optional space) or 0 prefix
+            [1-9]                    # First digit after prefix (not 0)
+            (?:[\s.\-]?\d{2}){4}     # 4 groups of 2 digits with optional separators
+        )
+        "
+    ).unwrap();
 }
 
 /// Extract all email addresses from HTML content
@@ -40,6 +52,39 @@ fn is_false_positive(email: &str) -> bool {
     }
     
     false
+}
+
+/// Extract all French phone numbers from HTML content
+pub fn extract_phones(html: &str) -> Vec<String> {
+    let mut phones: HashSet<String> = HashSet::new();
+    
+    for capture in PHONE_REGEX.find_iter(html) {
+        let phone = capture.as_str();
+        // Normalize the phone number
+        let normalized = normalize_phone(phone);
+        if !normalized.is_empty() {
+            phones.insert(normalized);
+        }
+    }
+    
+    phones.into_iter().collect()
+}
+
+/// Normalize a French phone number to a standard format
+fn normalize_phone(phone: &str) -> String {
+    // Remove all non-digit characters except the leading +
+    let digits: String = phone.chars()
+        .filter(|c| c.is_ascii_digit() || *c == '+')
+        .collect();
+    
+    // Convert +33 to 0 for consistency
+    if digits.starts_with("+33") {
+        format!("0{}", &digits[3..])
+    } else if digits.starts_with("33") && digits.len() == 11 {
+        format!("0{}", &digits[2..])
+    } else {
+        digits
+    }
 }
 
 /// Extract all links from HTML content
@@ -122,5 +167,35 @@ mod tests {
         assert!(links.iter().any(|u| u.path() == "/page1"));
         assert!(links.iter().any(|u| u.path() == "/page2"));
         assert!(!links.iter().any(|u| u.scheme() == "mailto"));
+    }
+
+    #[test]
+    fn test_extract_phones() {
+        let html = r#"
+            <html>
+                <body>
+                    Appelez-nous au 01 02 03 04 05
+                    Ou au +33 6 12 34 56 78
+                    Fax: 0102030405
+                    Mobile: +33612345678
+                    Autre: 01.02.03.04.05
+                    International: +33 1 02 03 04 05
+                </body>
+            </html>
+        "#;
+        
+        let phones = extract_phones(html);
+        assert!(phones.contains(&"0102030405".to_string()));
+        assert!(phones.contains(&"0612345678".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_phone() {
+        assert_eq!(normalize_phone("+33 1 02 03 04 05"), "0102030405");
+        assert_eq!(normalize_phone("01 02 03 04 05"), "0102030405");
+        assert_eq!(normalize_phone("0102030405"), "0102030405");
+        assert_eq!(normalize_phone("+33612345678"), "0612345678");
+        assert_eq!(normalize_phone("01.02.03.04.05"), "0102030405");
+        assert_eq!(normalize_phone("01-02-03-04-05"), "0102030405");
     }
 }

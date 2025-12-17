@@ -2,6 +2,7 @@ mod cli;
 mod crawler;
 mod database;
 mod extractor;
+mod image_processor;
 
 use cli::parse_args;
 use crawler::Crawler;
@@ -41,13 +42,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Print statistics
     let (unique_emails, total_entries) = db.get_stats()?;
+    let unique_phones = db.get_phone_count()?;
+    let images_saved = db.get_image_count()?;
     
     println!();
     println!("==========================");
     println!("Crawl complete!");
     println!("Time elapsed: {:.2}s", elapsed.as_secs_f64());
     println!("Unique emails found: {}", unique_emails);
-    println!("Total entries: {}", total_entries);
+    println!("Unique phones found: {}", unique_phones);
+    println!("Images with faces: {}", images_saved);
+    println!("Total email entries: {}", total_entries);
     println!("Results saved to: {}", args.db);
     
     Ok(())

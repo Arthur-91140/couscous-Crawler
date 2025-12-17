@@ -38,6 +38,30 @@ pub struct Args {
     /// Verbose output
     #[arg(short, long, default_value_t = false)]
     pub verbose: bool,
+
+    /// Disable SSL certificate verification
+    #[arg(short = 'k', long, default_value_t = false)]
+    pub insecure: bool,
+
+    /// Enable image face detection
+    #[arg(long, default_value_t = false)]
+    pub extract_images: bool,
+
+    /// Path to YOLO face detection model (.pt file)
+    #[arg(long, default_value = "face-detection/yolov12l-face.pt")]
+    pub yolo_model: String,
+
+    /// Minimum image width for face detection
+    #[arg(long, default_value_t = 128)]
+    pub min_image_width: u32,
+
+    /// Minimum image height for face detection
+    #[arg(long, default_value_t = 128)]
+    pub min_image_height: u32,
+
+    /// Output directory for images with faces
+    #[arg(long, default_value = "faces")]
+    pub faces_dir: String,
 }
 
 pub fn parse_args() -> Args {

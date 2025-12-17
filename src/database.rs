@@ -60,6 +60,34 @@ impl Database {
             )",
             [],
         )?;
+
+        // Phones table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS phones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                found_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(phone, source_url)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_phone ON phones(phone)",
+            [],
+        )?;
+
+        // Images table (for face detection)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL UNIQUE,
+                source_url TEXT NOT NULL,
+                found_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
         
         Ok(())
     }
@@ -203,5 +231,47 @@ impl Database {
         let unique = self.get_email_count()?;
         let total = self.get_total_entries()?;
         Ok((unique, total))
+    }
+
+    /// Insert a phone number with its source URL (ignores duplicates)
+    pub fn insert_phone(&self, phone: &str, source_url: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO phones (phone, source_url) VALUES (?1, ?2)",
+            params![phone, source_url],
+        )?;
+        Ok(result > 0)
+    }
+
+    /// Get total count of unique phones
+    pub fn get_phone_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: u64 = conn.query_row(
+            "SELECT COUNT(DISTINCT phone) FROM phones",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Insert an image with its UUID and source URL
+    pub fn insert_image(&self, uuid: &str, source_url: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO images (uuid, source_url) VALUES (?1, ?2)",
+            params![uuid, source_url],
+        )?;
+        Ok(result > 0)
+    }
+
+    /// Get total count of images
+    pub fn get_image_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM images",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 }

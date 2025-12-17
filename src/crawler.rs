@@ -1,6 +1,7 @@
 use crate::cli::Args;
 use crate::database::Database;
-use crate::extractor::{extract_emails, extract_links, is_same_domain};
+use crate::extractor::{extract_emails, extract_links, extract_phones, is_same_domain};
+use crate::image_processor::ImageProcessor;
 use colored::*;
 use rand::Rng;
 use reqwest::Client;
@@ -83,13 +84,14 @@ impl Crawler {
 }
 
 /// Create a stealthy HTTP client with random user agent
-fn create_stealth_client(timeout_ms: u64) -> Result<Client, reqwest::Error> {
+fn create_stealth_client(timeout_ms: u64, insecure: bool) -> Result<Client, reqwest::Error> {
     let mut rng = rand::thread_rng();
     let user_agent = USER_AGENTS[rng.gen_range(0..USER_AGENTS.len())];
     
     Client::builder()
         .user_agent(user_agent)
         .timeout(std::time::Duration::from_millis(timeout_ms))
+        .danger_accept_invalid_certs(insecure)
         .build()
 }
 
@@ -162,7 +164,7 @@ async fn process_url(
     };
 
     // Create a new client for each request (with random user agent)
-    let client = match create_stealth_client(args.timeout) {
+    let client = match create_stealth_client(args.timeout, args.insecure) {
         Ok(c) => c,
         Err(e) => {
             if args.verbose {
@@ -200,6 +202,50 @@ async fn process_url(
 
     if !emails.is_empty() {
         println!("{}", format!("Found {} emails ({} new) on {}", emails.len(), new_emails, url).green());
+    }
+
+    // Extract phones
+    let phones = extract_phones(&html);
+    let mut new_phones = 0;
+    for phone in &phones {
+        match db.insert_phone(phone, url) {
+            Ok(true) => new_phones += 1,
+            Ok(false) => {}
+            Err(e) => {
+                if args.verbose {
+                    eprintln!("{}", format!("[DB Error] {}", e).red());
+                }
+            }
+        }
+    }
+
+    if !phones.is_empty() {
+        println!("{}", format!("Found {} phones ({} new) on {}", phones.len(), new_phones, url).cyan());
+    }
+
+    // Extract and process images if enabled
+    if args.extract_images {
+        let image_urls = ImageProcessor::extract_image_urls(&html, &parsed_url);
+        
+        if args.verbose {
+            println!("{}", format!("[Images] Found {} image URLs on {}", image_urls.len(), url).blue());
+        }
+        
+        if !image_urls.is_empty() {
+            let processor = ImageProcessor::new(
+                &args.faces_dir,
+                &args.yolo_model,
+                args.min_image_width,
+                args.min_image_height,
+            );
+            
+            for img_url in image_urls {
+                if args.verbose {
+                    println!("{}", format!("[Image] Processing: {}", img_url).blue());
+                }
+                let _ = processor.process_image(&client, &img_url, db, args.verbose).await;
+            }
+        }
     }
 
     // Check depth limit
